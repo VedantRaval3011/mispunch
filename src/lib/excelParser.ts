@@ -8,123 +8,146 @@ export async function parseTimesheet(file: File): Promise<Mispunch[]> {
   
   const mispunches: Mispunch[] = [];
   
-  // Map to group punches by date for each employee
-  interface DatePunches {
-    date: string;
-    startCol: number;
-    punches: Array<{ col: number; type: 'In' | 'Out'; value: any }>;
-  }
+  // Find all data sections with employees
+  const dataSections: Array<{ startRow: number; endRow: number }> = [];
   
-  // First pass: Find all unique dates and their column ranges
-  const dateColumns = new Map<string, number[]>();
-  
-  for (let col = 4; col < 160; col++) {
-    const cellRef = XLSX.utils.encode_cell({ r: 8, c: col }); // Row 9 (0-indexed: 8)
-    const subHeaderRef = XLSX.utils.encode_cell({ r: 12, c: col }); // Row 13
-    
-    const dateValue = worksheet[cellRef]?.v;
-    const subHeader = worksheet[subHeaderRef]?.v;
-    
-    if (dateValue) {
-      let dateStr: string;
-      if (dateValue instanceof Date) {
-        dateStr = formatDate(dateValue);
-      } else {
-        dateStr = String(dateValue).trim();
-      }
+  for (let row = 0; row < 300; row++) {
+    const cellValue = worksheet[XLSX.utils.encode_cell({ r: row, c: 0 })]?.v;
+    if (cellValue && String(cellValue).includes('EMP Code')) {
+      let endRow = row + 1;
       
-      if (!dateColumns.has(dateStr)) {
-        dateColumns.set(dateStr, []);
-      }
-      dateColumns.get(dateStr)!.push(col);
-    }
-    
-    // Also track columns that belong to the previous date (no date header but have In/Out)
-    if (!dateValue && subHeader && (subHeader === 'In' || subHeader === 'Out')) {
-      // Find the most recent date
-      for (let backCol = col - 1; backCol >= 4; backCol--) {
-        const backDateRef = XLSX.utils.encode_cell({ r: 8, c: backCol });
-        const backDateValue = worksheet[backDateRef]?.v;
-        if (backDateValue) {
-          let dateStr: string;
-          if (backDateValue instanceof Date) {
-            dateStr = formatDate(backDateValue);
-          } else {
-            dateStr = String(backDateValue).trim();
-          }
-          if (!dateColumns.get(dateStr)!.includes(col)) {
-            dateColumns.get(dateStr)!.push(col);
-          }
+      for (let checkRow = row + 1; checkRow < 300; checkRow++) {
+        const empCode = worksheet[XLSX.utils.encode_cell({ r: checkRow, c: 0 })]?.v;
+        const empName = worksheet[XLSX.utils.encode_cell({ r: checkRow, c: 2 })]?.v;
+        
+        // ✅ Skip if undefined/null
+        if (!empCode || !empName) {
+          continue;
+        }
+        
+        if (empCode && empName) {
+          endRow = checkRow;
+        } else if (
+          (empCode && String(empCode).includes('Company')) ||
+          (empCode && String(empCode).includes('Department'))
+        ) {
           break;
         }
       }
+      
+      if (endRow > row + 1) {
+        dataSections.push({ startRow: row + 1, endRow });
+      }
     }
   }
   
-  // Process employees starting from row 14 (0-indexed: row 13)
-  let rowIdx = 13;
-  
-  while (true) {
-    const empCodeCell = XLSX.utils.encode_cell({ r: rowIdx, c: 0 });
-    const empNameCell = XLSX.utils.encode_cell({ r: rowIdx, c: 2 });
-    
-    const empCode = worksheet[empCodeCell]?.v;
-    const empName = worksheet[empNameCell]?.v;
-    
-    if (!empCode || !empName) break;
-    
-    // For each date, count all In and Out punches
-    for (const [dateStr, columns] of dateColumns.entries()) {
-      const punches: Array<{ type: string; time: any }> = [];
+  // Process all employees from all sections
+  for (const section of dataSections) {
+    for (let rowIdx = section.startRow; rowIdx <= section.endRow; rowIdx++) {
+      const empCodeCell = XLSX.utils.encode_cell({ r: rowIdx, c: 0 });
+      const empNameCell = XLSX.utils.encode_cell({ r: rowIdx, c: 2 });
       
-      for (const col of columns) {
-        const subHeaderRef = XLSX.utils.encode_cell({ r: 12, c: col });
+      const empCode = worksheet[empCodeCell]?.v;
+      const empName = worksheet[empNameCell]?.v;
+      
+      // ✅ Skip if empCode or empName is undefined/null
+      if (!empCode || !empName) {
+        continue;
+      }
+      
+      // ✅ Skip if empCode is a string (header/label rows)
+      if (typeof empCode === 'string') {
+        if (empCode.includes('Company') || empCode.includes('Department') || empCode.includes('EMP')) {
+          continue;
+        }
+      }
+      
+      // ✅ Group punches by ACTUAL date from timestamp, not header
+      const dateGroups = new Map<string, Array<{ type: string; time: any }>>();
+      
+      for (let col = 4; col < 160; col++) {
+        const subHeaderRef = XLSX.utils.encode_cell({ r: 12, c: col }); // Row 13 (In/Out)
         const cellRef = XLSX.utils.encode_cell({ r: rowIdx, c: col });
         
         const subHeader = worksheet[subHeaderRef]?.v;
         const cellValue = worksheet[cellRef]?.v;
         
-        if (cellValue && (subHeader === 'In' || subHeader === 'Out')) {
-          punches.push({
-            type: subHeader,
-            time: cellValue
+        // ✅ Skip if undefined/null
+        if (!cellValue || !subHeader) {
+          continue;
+        }
+        
+        // ✅ Only process In or Out types
+        if (subHeader !== 'In' && subHeader !== 'Out') {
+          continue;
+        }
+        
+        // ✅ Extract actual date from the timestamp
+        let actualDate: string;
+        if (cellValue instanceof Date) {
+          actualDate = formatDate(cellValue);
+        } else {
+          actualDate = String(cellValue).trim();
+        }
+        
+        // ✅ Skip if actualDate is empty or 'undefined'
+        if (!actualDate || actualDate === 'undefined' || actualDate === 'Invalid Date') {
+          continue;
+        }
+        
+        if (!dateGroups.has(actualDate)) {
+          dateGroups.set(actualDate, []);
+        }
+        dateGroups.get(actualDate)!.push({
+          type: subHeader,
+          time: cellValue
+        });
+      }
+      
+      // Check each date for odd punch counts
+      for (const [dateStr, punches] of dateGroups.entries()) {
+        // ✅ Skip if no punches (0 count = absent, ignore)
+        if (punches.length === 0) {
+          continue;
+        }
+        
+        // ✅ Only flag as mispunch if count is ODD and > 0
+        if (punches.length % 2 === 1) {
+          // Determine issue type
+          const inCount = punches.filter(p => p.type === 'In').length;
+          const outCount = punches.filter(p => p.type === 'Out').length;
+          
+          let issue: 'Missing In' | 'Missing Out' | 'Odd punches';
+          if (inCount > outCount) {
+            issue = 'Missing Out';
+          } else if (outCount > inCount) {
+            issue = 'Missing In';
+          } else {
+            issue = 'Odd punches';
+          }
+          
+          // Get first In and last Out for display
+          const firstIn = punches.find(p => p.type === 'In');
+          const lastOut = punches.filter(p => p.type === 'Out').pop();
+          
+          // ✅ Skip if firstIn or lastOut is undefined
+          if (!firstIn || !lastOut) {
+            continue;
+          }
+          
+          mispunches.push({
+            rowNumber: rowIdx + 1,
+            empCode: String(empCode),
+            empName: String(empName),
+            date: dateStr,
+            inTime: formatTime(firstIn.time),
+            outTime: formatTime(lastOut.time),
+            punchCount: punches.length,
+            issue
           });
         }
       }
-      
-      // Check if punch count is odd
-      if (punches.length > 0 && punches.length % 2 === 1) {
-        // Determine issue type
-        const inCount = punches.filter(p => p.type === 'In').length;
-        const outCount = punches.filter(p => p.type === 'Out').length;
-        
-        let issue: 'Missing In' | 'Missing Out' | 'Odd punches';
-        if (inCount > outCount) {
-          issue = 'Missing Out';
-        } else if (outCount > inCount) {
-          issue = 'Missing In';
-        } else {
-          issue = 'Odd punches';
-        }
-        
-        // Get first In and last Out for display
-        const firstIn = punches.find(p => p.type === 'In');
-        const lastOut = punches.filter(p => p.type === 'Out').pop();
-        
-        mispunches.push({
-          rowNumber: rowIdx + 1,
-          empCode: String(empCode),
-          empName: String(empName),
-          date: dateStr,
-          inTime: firstIn ? formatTime(firstIn.time) : 'Missing',
-          outTime: lastOut ? formatTime(lastOut.time) : 'Missing',
-          punchCount: punches.length,
-          issue
-        });
-      }
     }
-    
-    rowIdx++;
   }
   
   return mispunches;

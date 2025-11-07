@@ -1,10 +1,68 @@
 'use client';
 
 import { Mispunch } from '@/lib/types';
+import * as XLSX from 'xlsx';
 
 export default function MispunchTable({ mispunches }: { mispunches: Mispunch[] }) {
+  // ✅ Export to Excel function (with formatting)
+  const exportToExcel = () => {
+    if (mispunches.length === 0) {
+      alert('No mispunches to export');
+      return;
+    }
+
+    // Create data array
+    const data = mispunches.map(m => ({
+      'Row': m.rowNumber,
+      'Emp Code': m.empCode,
+      'Employee Name': m.empName,
+      'Date': m.date,
+      'First In': m.inTime,
+      'Last Out': m.outTime,
+      'Total Punches': m.punchCount,
+      'Issue': m.issue
+    }));
+
+    // Create workbook and worksheet
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Mispunches');
+
+    // ✅ Add column widths for better readability
+    worksheet['!cols'] = [
+      { wch: 8 },  // Row
+      { wch: 12 }, // Emp Code
+      { wch: 20 }, // Employee Name
+      { wch: 12 }, // Date
+      { wch: 12 }, // First In
+      { wch: 12 }, // Last Out
+      { wch: 15 }, // Total Punches
+      { wch: 15 }  // Issue
+    ];
+
+    // Generate filename with date
+    const filename = `mispunches_${new Date().toISOString().split('T')[0]}.xlsx`;
+    
+    // Write file
+    XLSX.writeFile(workbook, filename);
+  };
+
   return (
     <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+      {/* ✅ Export Button */}
+      <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-slate-800">
+          Mispunches ({mispunches.length})
+        </h3>
+        <button
+          onClick={exportToExcel}
+          className="flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition"
+        >
+          
+          Export to Excel
+        </button>
+      </div>
+
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead className="bg-slate-700 text-white">
